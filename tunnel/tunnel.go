@@ -279,7 +279,7 @@ func preHandleMetadata(metadata *C.Metadata) error {
 }
 
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
-	if metadata.SpecialProxy != "" {
+	if metadata.SpecialProxy != "" && matchSpecialRules(metadata) == nil {
 		var exist bool
 		proxy, exist = proxies[metadata.SpecialProxy]
 		if !exist {
@@ -405,6 +405,8 @@ func handleUDPConn(packet C.PacketAdapter) {
 		pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, metadata, rule, 0, 0, true)
 
 		switch true {
+		case metadata.SpecialRules != "" && matchSpecialRules(metadata) != nil:
+			log.Infoln("[UDP] %s --> %s using %s", metadata.SourceDetail(), metadata.RemoteAddress(), matchSpecialRules(metadata).Adapter())
 		case metadata.SpecialProxy != "":
 			log.Infoln("[UDP] %s --> %s using %s", metadata.SourceDetail(), metadata.RemoteAddress(), metadata.SpecialProxy)
 		case rule != nil:
@@ -561,6 +563,8 @@ func handleTCPConn(connCtx C.ConnContext) {
 	}(remoteConn)
 
 	switch true {
+	case metadata.SpecialRules != "" && matchSpecialRules(metadata) != nil:
+		log.Infoln("[TCP] %s --> %s using %s", metadata.SourceDetail(), metadata.RemoteAddress(), matchSpecialRules(metadata).Adapter())
 	case metadata.SpecialProxy != "":
 		log.Infoln("[TCP] %s --> %s using %s", metadata.SourceDetail(), metadata.RemoteAddress(), metadata.SpecialProxy)
 	case rule != nil:
@@ -673,6 +677,15 @@ func match(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
 	}
 
 	return proxies["DIRECT"], nil, nil
+}
+
+func matchSpecialRules(metadata *C.Metadata) C.Rule {
+	for _, temVar := range getRules(metadata) {
+		if matched, _ := temVar.Match(metadata); matched {
+			return temVar
+		}
+	}
+	return nil
 }
 
 func getRules(metadata *C.Metadata) []C.Rule {
