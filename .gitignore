@@ -27,3 +27,4 @@ test/config/cache*
 .vscode/
 .fleet/
 mihomo.yaml
+mihomo
