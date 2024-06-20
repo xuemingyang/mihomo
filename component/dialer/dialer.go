@@ -164,7 +164,7 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 	if opt.mpTcp {
 		setMultiPathTCP(dialer)
 	}
-	if opt.tfo {
+	if opt.tfo && !DisableTFO {
 		return dialTFO(ctx, *dialer, network, address)
 	}
 	return dialer.DialContext(ctx, network, address)
@@ -378,12 +378,12 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (net.C
 }
 
 func (d Dialer) ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error) {
-	opt := WithOption(d.Opt)
+	opt := d.Opt // make a copy
 	if rAddrPort.Addr().Unmap().IsLoopback() {
 		// avoid "The requested address is not valid in its context."
-		opt = WithInterface("")
+		WithInterface("")(&opt)
 	}
-	return ListenPacket(ctx, ParseNetwork(network, rAddrPort.Addr()), address, rAddrPort, opt)
+	return ListenPacket(ctx, ParseNetwork(network, rAddrPort.Addr()), address, rAddrPort, WithOption(opt))
 }
 
 func NewDialer(options ...Option) Dialer {
