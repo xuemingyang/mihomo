@@ -1,7 +1,6 @@
 package route
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,9 +14,11 @@ import (
 
 func upgradeRouter() http.Handler {
 	r := chi.NewRouter()
-	r.Post("/", upgradeCore)
 	r.Post("/ui", updateUI)
-	r.Post("/geo", updateGeoDatabases)
+	if !embedMode { // disallow upgrade core/geo in embed mode
+		r.Post("/", upgradeCore)
+		r.Post("/geo", updateGeoDatabases)
+	}
 	return r
 }
 
@@ -31,7 +32,11 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = updater.UpdateCore(execPath)
+	query := r.URL.Query()
+	channel := query.Get("channel")
+	force := query.Get("force") == "true"
+
+	err = updater.DefaultCoreUpdater.Update(execPath, channel, force)
 	if err != nil {
 		log.Warnln("%s", err)
 		render.Status(r, http.StatusInternalServerError)
@@ -48,17 +53,11 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateUI(w http.ResponseWriter, r *http.Request) {
-	err := updater.UpdateUI()
+	err := updater.DefaultUiUpdater.DownloadUI()
 	if err != nil {
-		if errors.Is(err, updater.ErrIncompleteConf) {
-			log.Warnln("%s", err)
-			render.Status(r, http.StatusNotImplemented)
-			render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
-		} else {
-			log.Warnln("%s", err)
-			render.Status(r, http.StatusInternalServerError)
-			render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
-		}
+		log.Warnln("%s", err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
 		return
 	}
 
