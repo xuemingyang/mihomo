@@ -3,11 +3,11 @@ package outbound
 import (
 	"context"
 	"net"
+	"net/netip"
 	"time"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/pool"
-	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -23,15 +23,18 @@ type DnsOption struct {
 }
 
 // DialContext implements C.ProxyAdapter
-func (d *Dns) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.Conn, error) {
+func (d *Dns) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	left, right := N.Pipe()
 	go resolver.RelayDnsConn(context.Background(), right, 0)
 	return NewConn(left, d), nil
 }
 
 // ListenPacketContext implements C.ProxyAdapter
-func (d *Dns) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
+func (d *Dns) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
 	log.Debugln("[DNS] hijack udp:%s from %s", metadata.RemoteAddress(), metadata.SourceAddrPort())
+	if err := d.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -40,6 +43,13 @@ func (d *Dns) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opt
 		ctx:      ctx,
 		cancel:   cancel,
 	}, d), nil
+}
+
+func (d *Dns) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+	if !metadata.Resolved() {
+		metadata.DstIP = netip.AddrFrom4([4]byte{127, 0, 0, 2})
+	}
+	return nil
 }
 
 type dnsPacket struct {
@@ -89,14 +99,14 @@ func (d *dnsPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return len(p), nil
 	}
 
-	ctx, cancel := context.WithTimeout(d.ctx, resolver.DefaultDnsRelayTimeout)
-	defer cancel()
-
 	buf := pool.Get(resolver.SafeDnsPacketSize)
 	put := func() { _ = pool.Put(buf) }
 	copy(buf, p) // avoid p be changed after WriteTo returned
 
 	go func() { // don't block the WriteTo function
+		ctx, cancel := context.WithTimeout(d.ctx, resolver.DefaultDnsRelayTimeout)
+		defer cancel()
+
 		buf, err = resolver.RelayDnsPacket(ctx, buf[:len(p)], buf)
 		if err != nil {
 			put()

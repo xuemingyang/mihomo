@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/dlclark/regexp2"
+
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	types "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
 )
 
 var (
@@ -21,7 +23,6 @@ var (
 )
 
 type GroupCommonOption struct {
-	outbound.BasicOption
 	Name                string   `group:"name"`
 	Type                string   `group:"type"`
 	Proxies             []string `group:"proxies,omitempty"`
@@ -41,6 +42,10 @@ type GroupCommonOption struct {
 	IncludeAllProviders bool     `group:"include-all-providers,omitempty"`
 	Hidden              bool     `group:"hidden,omitempty"`
 	Icon                string   `group:"icon,omitempty"`
+
+	// removed configs, only for error logging
+	Interface   string `group:"interface-name,omitempty"`
+	RoutingMark int    `group:"routing-mark,omitempty"`
 }
 
 func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]types.ProxyProvider, AllProxies []string, AllProviders []string) (C.ProxyAdapter, error) {
@@ -57,6 +62,13 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 
+	if groupOption.RoutingMark != 0 {
+		log.Errorln("The group [%s] with routing-mark configuration was removed, please set it directly on the proxy instead", groupOption.Name)
+	}
+	if groupOption.Interface != "" {
+		log.Errorln("The group [%s] with interface-name configuration was removed, please set it directly on the proxy instead", groupOption.Name)
+	}
+
 	groupName := groupOption.Name
 
 	providers := []types.ProxyProvider{}
@@ -67,10 +79,28 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	if groupOption.IncludeAllProviders {
-		groupOption.Use = append(groupOption.Use, AllProviders...)
+		groupOption.Use = AllProviders
 	}
 	if groupOption.IncludeAllProxies {
-		groupOption.Proxies = append(groupOption.Proxies, AllProxies...)
+		if groupOption.Filter != "" {
+			var filterRegs []*regexp2.Regexp
+			for _, filter := range strings.Split(groupOption.Filter, "`") {
+				filterReg := regexp2.MustCompile(filter, regexp2.None)
+				filterRegs = append(filterRegs, filterReg)
+			}
+			for _, p := range AllProxies {
+				for _, filterReg := range filterRegs {
+					if mat, _ := filterReg.MatchString(p); mat {
+						groupOption.Proxies = append(groupOption.Proxies, p)
+					}
+				}
+			}
+		} else {
+			groupOption.Proxies = append(groupOption.Proxies, AllProxies...)
+		}
+		if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
+			groupOption.Proxies = []string{"COMPATIBLE"}
+		}
 	}
 
 	if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
@@ -88,6 +118,29 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 	groupOption.ExpectedStatus = status
 
+	if len(groupOption.Use) != 0 {
+		PDs, err := getProviders(providersMap, groupOption.Use)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", groupName, err)
+		}
+
+		// if test URL is empty, use the first health check URL of providers
+		if groupOption.URL == "" {
+			for _, pd := range PDs {
+				if pd.HealthCheckURL() != "" {
+					groupOption.URL = pd.HealthCheckURL()
+					break
+				}
+			}
+			if groupOption.URL == "" {
+				groupOption.URL = C.DefaultTestURL
+			}
+		} else {
+			addTestUrlToProviders(PDs, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
+		}
+		providers = append(providers, PDs...)
+	}
+
 	if len(groupOption.Proxies) != 0 {
 		ps, err := getProxies(proxyMap, groupOption.Proxies)
 		if err != nil {
@@ -98,13 +151,14 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			return nil, fmt.Errorf("%s: %w", groupName, errDuplicateProvider)
 		}
 
-		// select don't need health check
+		if groupOption.URL == "" {
+			groupOption.URL = C.DefaultTestURL
+		}
+
+		// select don't need auto health check
 		if groupOption.Type != "select" && groupOption.Type != "relay" {
 			if groupOption.Interval == 0 {
 				groupOption.Interval = 300
-			}
-			if groupOption.URL == "" {
-				groupOption.URL = C.DefaultTestURL
 			}
 		}
 
@@ -115,32 +169,8 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			return nil, fmt.Errorf("%s: %w", groupName, err)
 		}
 
-		providers = append(providers, pd)
+		providers = append([]types.ProxyProvider{pd}, providers...)
 		providersMap[groupName] = pd
-	}
-
-	if len(groupOption.Use) != 0 {
-		list, err := getProviders(providersMap, groupOption.Use)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", groupName, err)
-		}
-
-		if groupOption.URL == "" {
-			for _, p := range list {
-				if p.HealthCheckURL() != "" {
-					groupOption.URL = p.HealthCheckURL()
-				}
-				break
-			}
-
-			if groupOption.URL == "" {
-				groupOption.URL = C.DefaultTestURL
-			}
-		}
-
-		// different proxy groups use different test URL
-		addTestUrlToProviders(list, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
-		providers = append(providers, list...)
 	}
 
 	var group C.ProxyAdapter

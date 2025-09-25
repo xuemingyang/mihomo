@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
+	"golang.org/x/net/idna"
 )
 
 type DomainSuffix struct {
@@ -16,7 +17,7 @@ func (ds *DomainSuffix) RuleType() C.RuleType {
 	return C.DomainSuffix
 }
 
-func (ds *DomainSuffix) Match(metadata *C.Metadata) (bool, string) {
+func (ds *DomainSuffix) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	domain := metadata.RuleHost()
 	return strings.HasSuffix(domain, "."+ds.suffix) || domain == ds.suffix, ds.adapter
 }
@@ -30,9 +31,10 @@ func (ds *DomainSuffix) Payload() string {
 }
 
 func NewDomainSuffix(suffix string, adapter string) *DomainSuffix {
+	punycode, _ := idna.ToASCII(strings.ToLower(suffix))
 	return &DomainSuffix{
 		Base:    &Base{},
-		suffix:  strings.ToLower(suffix),
+		suffix:  punycode,
 		adapter: adapter,
 	}
 }

@@ -10,6 +10,10 @@ import (
 )
 
 func ParseRule(tp, payload, target string, params []string, subRules map[string][]C.Rule) (parsed C.Rule, parseErr error) {
+	if tp != "MATCH" && payload == "" { // only MATCH allowed doesn't contain payload
+		return nil, fmt.Errorf("missing subsequent parameters: %s", tp)
+	}
+
 	switch tp {
 	case "DOMAIN":
 		parsed = RC.NewDomain(payload, target)
@@ -19,22 +23,28 @@ func ParseRule(tp, payload, target string, params []string, subRules map[string]
 		parsed = RC.NewDomainKeyword(payload, target)
 	case "DOMAIN-REGEX":
 		parsed, parseErr = RC.NewDomainRegex(payload, target)
+	case "DOMAIN-WILDCARD":
+		parsed, parseErr = RC.NewDomainWildcard(payload, target)
 	case "GEOSITE":
 		parsed, parseErr = RC.NewGEOSITE(payload, target)
 	case "GEOIP":
-		noResolve := RC.HasNoResolve(params)
-		parsed, parseErr = RC.NewGEOIP(payload, target, noResolve)
-	case "IP-CIDR", "IP-CIDR6":
-		noResolve := RC.HasNoResolve(params)
-		parsed, parseErr = RC.NewIPCIDR(payload, target, RC.WithIPCIDRNoResolve(noResolve))
+		isSrc, noResolve := RC.ParseParams(params)
+		parsed, parseErr = RC.NewGEOIP(payload, target, isSrc, noResolve)
+	case "SRC-GEOIP":
+		parsed, parseErr = RC.NewGEOIP(payload, target, true, true)
 	case "IP-ASN":
-		noResolve := RC.HasNoResolve(params)
-		parsed, parseErr = RC.NewIPASN(payload, target, noResolve)
+		isSrc, noResolve := RC.ParseParams(params)
+		parsed, parseErr = RC.NewIPASN(payload, target, isSrc, noResolve)
+	case "SRC-IP-ASN":
+		parsed, parseErr = RC.NewIPASN(payload, target, true, true)
+	case "IP-CIDR", "IP-CIDR6":
+		isSrc, noResolve := RC.ParseParams(params)
+		parsed, parseErr = RC.NewIPCIDR(payload, target, RC.WithIPCIDRSourceIP(isSrc), RC.WithIPCIDRNoResolve(noResolve))
 	case "SRC-IP-CIDR":
 		parsed, parseErr = RC.NewIPCIDR(payload, target, RC.WithIPCIDRSourceIP(true), RC.WithIPCIDRNoResolve(true))
 	case "IP-SUFFIX":
-		noResolve := RC.HasNoResolve(params)
-		parsed, parseErr = RC.NewIPSuffix(payload, target, false, noResolve)
+		isSrc, noResolve := RC.ParseParams(params)
+		parsed, parseErr = RC.NewIPSuffix(payload, target, isSrc, noResolve)
 	case "SRC-IP-SUFFIX":
 		parsed, parseErr = RC.NewIPSuffix(payload, target, true, true)
 	case "SRC-PORT":
@@ -46,9 +56,13 @@ func ParseRule(tp, payload, target string, params []string, subRules map[string]
 	case "DSCP":
 		parsed, parseErr = RC.NewDSCP(payload, target)
 	case "PROCESS-NAME":
-		parsed, parseErr = RC.NewProcess(payload, target, true)
+		parsed, parseErr = RC.NewProcess(payload, target, true, false)
 	case "PROCESS-PATH":
-		parsed, parseErr = RC.NewProcess(payload, target, false)
+		parsed, parseErr = RC.NewProcess(payload, target, false, false)
+	case "PROCESS-NAME-REGEX":
+		parsed, parseErr = RC.NewProcess(payload, target, true, true)
+	case "PROCESS-PATH-REGEX":
+		parsed, parseErr = RC.NewProcess(payload, target, false, true)
 	case "NETWORK":
 		parsed, parseErr = RC.NewNetworkType(payload, target)
 	case "UID":
@@ -68,13 +82,13 @@ func ParseRule(tp, payload, target string, params []string, subRules map[string]
 	case "NOT":
 		parsed, parseErr = logic.NewNOT(payload, target, ParseRule)
 	case "RULE-SET":
-		noResolve := RC.HasNoResolve(params)
-		parsed, parseErr = RP.NewRuleSet(payload, target, noResolve)
+		isSrc, noResolve := RC.ParseParams(params)
+		parsed, parseErr = RP.NewRuleSet(payload, target, isSrc, noResolve)
 	case "MATCH":
 		parsed = RC.NewMatch(target)
 		parseErr = nil
 	default:
-		parseErr = fmt.Errorf("unsupported rule type %s", tp)
+		parseErr = fmt.Errorf("unsupported rule type: %s", tp)
 	}
 
 	if parseErr != nil {
@@ -83,3 +97,5 @@ func ParseRule(tp, payload, target string, params []string, subRules map[string]
 
 	return
 }
+
+var _ RC.ParseRuleFunc = ParseRule

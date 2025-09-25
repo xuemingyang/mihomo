@@ -2,29 +2,29 @@ package logic
 
 import (
 	"fmt"
-	list "github.com/bahlo/generic-list-go"
 	"regexp"
 	"strings"
+	"sync"
 
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/rules/common"
+
+	list "github.com/bahlo/generic-list-go"
 )
 
 type Logic struct {
 	*common.Base
-	payload     string
-	adapter     string
-	ruleType    C.RuleType
-	rules       []C.Rule
-	subRules    map[string][]C.Rule
-	needIP      bool
-	needProcess bool
+	payload  string
+	adapter  string
+	ruleType C.RuleType
+	rules    []C.Rule
+	subRules map[string][]C.Rule
+
+	payloadOnce sync.Once
 }
 
-type ParseRuleFunc func(tp, payload, target string, params []string, subRules map[string][]C.Rule) (C.Rule, error)
-
-func NewSubRule(payload, adapter string, subRules map[string][]C.Rule, parseRule ParseRuleFunc) (*Logic, error) {
-	logic := &Logic{Base: &common.Base{}, payload: payload, adapter: adapter, ruleType: C.SubRules}
+func NewSubRule(payload, adapter string, subRules map[string][]C.Rule, parseRule common.ParseRuleFunc) (*Logic, error) {
+	logic := &Logic{Base: &common.Base{}, payload: payload, adapter: adapter, ruleType: C.SubRules, subRules: subRules}
 	err := logic.parsePayload(fmt.Sprintf("(%s)", payload), parseRule)
 	if err != nil {
 		return nil, err
@@ -33,19 +33,10 @@ func NewSubRule(payload, adapter string, subRules map[string][]C.Rule, parseRule
 	if len(logic.rules) != 1 {
 		return nil, fmt.Errorf("Sub-Rule rule must contain one rule")
 	}
-	for _, rule := range subRules[adapter] {
-		if rule.ShouldResolveIP() {
-			logic.needIP = true
-		}
-		if rule.ShouldFindProcess() {
-			logic.needProcess = true
-		}
-	}
-	logic.subRules = subRules
 	return logic, nil
 }
 
-func NewNOT(payload string, adapter string, parseRule ParseRuleFunc) (*Logic, error) {
+func NewNOT(payload string, adapter string, parseRule common.ParseRuleFunc) (*Logic, error) {
 	logic := &Logic{Base: &common.Base{}, payload: payload, adapter: adapter, ruleType: C.NOT}
 	err := logic.parsePayload(payload, parseRule)
 	if err != nil {
@@ -55,52 +46,24 @@ func NewNOT(payload string, adapter string, parseRule ParseRuleFunc) (*Logic, er
 	if len(logic.rules) != 1 {
 		return nil, fmt.Errorf("not rule must contain one rule")
 	}
-	logic.needIP = logic.rules[0].ShouldResolveIP()
-	logic.needProcess = logic.rules[0].ShouldFindProcess()
-	logic.payload = fmt.Sprintf("(!(%s,%s))", logic.rules[0].RuleType(), logic.rules[0].Payload())
 	return logic, nil
 }
 
-func NewOR(payload string, adapter string, parseRule ParseRuleFunc) (*Logic, error) {
+func NewOR(payload string, adapter string, parseRule common.ParseRuleFunc) (*Logic, error) {
 	logic := &Logic{Base: &common.Base{}, payload: payload, adapter: adapter, ruleType: C.OR}
 	err := logic.parsePayload(payload, parseRule)
 	if err != nil {
 		return nil, err
 	}
-
-	payloads := make([]string, 0, len(logic.rules))
-	for _, rule := range logic.rules {
-		payloads = append(payloads, fmt.Sprintf("(%s,%s)", rule.RuleType().String(), rule.Payload()))
-		if rule.ShouldResolveIP() {
-			logic.needIP = true
-		}
-		if rule.ShouldFindProcess() {
-			logic.needProcess = true
-		}
-	}
-	logic.payload = fmt.Sprintf("(%s)", strings.Join(payloads, " || "))
-
 	return logic, nil
 }
-func NewAND(payload string, adapter string, parseRule ParseRuleFunc) (*Logic, error) {
+
+func NewAND(payload string, adapter string, parseRule common.ParseRuleFunc) (*Logic, error) {
 	logic := &Logic{Base: &common.Base{}, payload: payload, adapter: adapter, ruleType: C.AND}
 	err := logic.parsePayload(payload, parseRule)
 	if err != nil {
 		return nil, err
 	}
-
-	payloads := make([]string, 0, len(logic.rules))
-	for _, rule := range logic.rules {
-		payloads = append(payloads, fmt.Sprintf("(%s,%s)", rule.RuleType().String(), rule.Payload()))
-		if rule.ShouldResolveIP() {
-			logic.needIP = true
-		}
-		if rule.ShouldFindProcess() {
-			logic.needProcess = true
-		}
-	}
-	logic.payload = fmt.Sprintf("(%s)", strings.Join(payloads, " && "))
-
 	return logic, nil
 }
 
@@ -114,22 +77,15 @@ func (r Range) containRange(preStart, preEnd int) bool {
 	return preStart < r.start && preEnd > r.end
 }
 
-func (logic *Logic) payloadToRule(subPayload string, parseRule ParseRuleFunc) (C.Rule, error) {
-	splitStr := strings.SplitN(subPayload, ",", 2)
-	if len(splitStr) < 2 {
-		return nil, fmt.Errorf("[%s] format is error", subPayload)
-	}
-
-	tp := splitStr[0]
-	payload := splitStr[1]
+func (logic *Logic) payloadToRule(subPayload string, parseRule common.ParseRuleFunc) (C.Rule, error) {
+	tp, payload, target, param := common.ParseRulePayload(subPayload, false)
 	switch tp {
 	case "MATCH", "SUB-RULE":
 		return nil, fmt.Errorf("unsupported rule type [%s] on logic rule", tp)
-	case "NOT", "OR", "AND":
-		return parseRule(tp, payload, "", nil, nil)
+	case "":
+		return nil, fmt.Errorf("[%s] format is error", subPayload)
 	}
-	param := strings.Split(payload, ",")
-	return parseRule(tp, param[0], "", param[1:], nil)
+	return parseRule(tp, payload, target, param, nil)
 }
 
 func (logic *Logic) format(payload string) ([]Range, error) {
@@ -195,7 +151,7 @@ func (logic *Logic) findSubRuleRange(payload string, ruleRanges []Range) []Range
 	return subRuleRange
 }
 
-func (logic *Logic) parsePayload(payload string, parseRule ParseRuleFunc) error {
+func (logic *Logic) parsePayload(payload string, parseRule common.ParseRuleFunc) error {
 	regex, err := regexp.Compile("\\(.*\\)")
 	if err != nil {
 		return err
@@ -217,13 +173,6 @@ func (logic *Logic) parsePayload(payload string, parseRule ParseRuleFunc) error 
 				return err
 			}
 
-			if rule.ShouldResolveIP() {
-				logic.needIP = true
-			}
-			if rule.ShouldFindProcess() {
-				logic.needProcess = true
-			}
-
 			rules = append(rules, rule)
 		}
 
@@ -239,11 +188,11 @@ func (logic *Logic) RuleType() C.RuleType {
 	return logic.ruleType
 }
 
-func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Rule) (bool, string) {
+func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Rule, helper C.RuleMatchHelper) (bool, string) {
 	for _, rule := range subRules[name] {
-		if m, a := rule.Match(metadata); m {
+		if m, a := rule.Match(metadata, helper); m {
 			if rule.RuleType() == C.SubRules {
-				matchSubRules(metadata, rule.Adapter(), subRules)
+				return matchSubRules(metadata, rule.Adapter(), subRules, helper)
 			} else {
 				return m, a
 			}
@@ -252,35 +201,35 @@ func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Ru
 	return false, ""
 }
 
-func (logic *Logic) Match(metadata *C.Metadata) (bool, string) {
+func (logic *Logic) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	switch logic.ruleType {
 	case C.SubRules:
-		if m, _ := logic.rules[0].Match(metadata); m {
-			return matchSubRules(metadata, logic.adapter, logic.subRules)
+		if m, _ := logic.rules[0].Match(metadata, helper); m {
+			return matchSubRules(metadata, logic.adapter, logic.subRules, helper)
 		}
 		return false, ""
 	case C.NOT:
-		if m, _ := logic.rules[0].Match(metadata); !m {
+		if m, _ := logic.rules[0].Match(metadata, helper); !m {
 			return true, logic.adapter
 		}
 		return false, ""
 	case C.OR:
 		for _, rule := range logic.rules {
-			if m, _ := rule.Match(metadata); m {
+			if m, _ := rule.Match(metadata, helper); m {
 				return true, logic.adapter
 			}
 		}
 		return false, ""
 	case C.AND:
 		for _, rule := range logic.rules {
-			if m, _ := rule.Match(metadata); !m {
+			if m, _ := rule.Match(metadata, helper); !m {
 				return false, logic.adapter
 			}
 		}
 		return true, logic.adapter
+	default:
+		return false, ""
 	}
-
-	return false, ""
 }
 
 func (logic *Logic) Adapter() string {
@@ -288,13 +237,31 @@ func (logic *Logic) Adapter() string {
 }
 
 func (logic *Logic) Payload() string {
+	logic.payloadOnce.Do(func() { // a little bit expensive, so only computed once
+		switch logic.ruleType {
+		case C.NOT:
+			logic.payload = fmt.Sprintf("(!(%s,%s))", logic.rules[0].RuleType(), logic.rules[0].Payload())
+		case C.OR:
+			payloads := make([]string, 0, len(logic.rules))
+			for _, rule := range logic.rules {
+				payloads = append(payloads, fmt.Sprintf("(%s,%s)", rule.RuleType().String(), rule.Payload()))
+			}
+			logic.payload = fmt.Sprintf("(%s)", strings.Join(payloads, " || "))
+		case C.AND:
+			payloads := make([]string, 0, len(logic.rules))
+			for _, rule := range logic.rules {
+				payloads = append(payloads, fmt.Sprintf("(%s,%s)", rule.RuleType().String(), rule.Payload()))
+			}
+			logic.payload = fmt.Sprintf("(%s)", strings.Join(payloads, " && "))
+		default:
+		}
+	})
 	return logic.payload
 }
 
-func (logic *Logic) ShouldResolveIP() bool {
-	return logic.needIP
-}
-
-func (logic *Logic) ShouldFindProcess() bool {
-	return logic.needProcess
+func (logic *Logic) ProviderNames() (names []string) {
+	for _, rule := range logic.rules {
+		names = append(names, rule.ProviderNames()...)
+	}
+	return
 }
